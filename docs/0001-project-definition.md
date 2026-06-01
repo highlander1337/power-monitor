@@ -14,14 +14,14 @@ The platform monitors electrical energy consumption at the outlet level, process
 
 The project is intentionally designed to showcase expertise in:
 
-* Embedded Systems Engineering
-* IoT Architecture
-* Event-Driven Systems
-* Backend Development
-* Database Modeling
-* Real-Time Telemetry Processing
-* Analytics and Reporting
-* System Design
+- Embedded Systems Engineering
+- IoT Architecture
+- Event-Driven Systems
+- Backend Development
+- Database Modeling
+- Real-Time Telemetry Processing
+- Analytics and Reporting
+- System Design
 
 ---
 
@@ -29,11 +29,11 @@ The project is intentionally designed to showcase expertise in:
 
 Users often lack visibility into:
 
-* Real-time power consumption
-* Historical energy usage
-* Energy cost attribution
-* High-consumption devices
-* Standby ("phantom") energy losses
+- Real-time power consumption
+- Historical energy usage
+- Energy cost attribution
+- High-consumption devices
+- Standby ("phantom") energy losses
 
 The platform provides detailed insights into energy consumption by monitoring individual outlets and aggregating data at the room level.
 
@@ -45,120 +45,65 @@ Create a room-based energy monitoring platform that:
 
 1. Measures electrical consumption per monitored outlet.
 2. Provides real-time visibility into power usage.
-3. Maintains historical telemetry records.
-4. Estimates energy costs.
+3. Maintains a permanent historical telemetry dataset.
+4. Estimates energy costs using configurable energy tariffs.
 5. Enables users to assign meaningful labels to monitored outlets.
-6. Preserves assignment history over time.
-7. Supports future expansion into analytics, anomaly detection, and predictive insights.
+6. Preserves assignment history through time-based outlet assignments.
+7. Generates minute, hourly, and daily analytical projections.
+8. Supports future expansion into anomaly detection, usage pattern analysis, and machine learning experimentation.
 
 ---
 
 # Core Design Principles
 
----
-
 ## Principle 1: Outlet-Centric Monitoring
 
-The system measures electrical consumption per monitored outlet (channel).
+Channels are the source of truth. Users may assign labels to channels to represent connected devices. Telemetry remains associated with the physical channel regardless of which device is connected.
 
-Channels are the source of truth.
+## Principle 2: Historical Assignment Preservation
 
-Users may assign labels to channels to represent connected devices.
+Assignments are modeled using StartDateUtc and EndDateUtc.
 
-### Example
+A channel may have only one active assignment at any given time. This rule is enforced by the Energy Analytics API.
 
-```text
-Channel 1
-Label: Gaming PC
-```
-
-The telemetry remains associated with the physical channel regardless of which device is connected.
-
----
-
-## Principle 2: Historical Metadata Preservation
-
-Device assignments are stored as metadata.
-
-Assignments are time-bound and preserve historical context.
-
-### Example
-
-```text
-May:
-Channel 1 → Gaming PC
-
-June:
-Channel 1 → 3D Printer
-```
-
-Historical reports accurately reflect the assignment that existed when telemetry was collected.
-
----
+Historical reports must reflect the assignment that was active when telemetry was collected.
 
 ## Principle 3: Room-Based Monitoring
 
-One ESP32 device monitors multiple electrical channels within a room.
+One ESP32 monitor manages multiple monitored outlets (channels) within a room.
 
-### Example
+Benefits:
 
-```text
-Office Monitor
-
-Channel 1 → Gaming PC
-Channel 2 → Monitor
-Channel 3 → Router
-Channel 4 → TV
-```
-
-### Benefits
-
-* Lower hardware cost
-* More interesting embedded design
-* Multi-channel telemetry processing
-* Better portfolio value
-
----
+- Lower hardware cost
+- Multi-channel telemetry processing
+- Better portfolio value
+- Simplified deployment
 
 ## Principle 4: Workload-Based Architecture
 
-The platform separates responsibilities according to workload characteristics rather than technical layers.
+Telemetry ingestion and business configuration have different characteristics.
 
-Telemetry ingestion and business configuration have fundamentally different operational requirements.
+Telemetry:
+- High-frequency
+- Event-driven
+- Machine-generated
 
-### Telemetry Workload
+Business Configuration:
+- Low-frequency
+- User-driven
+- CRUD-oriented
 
-Characteristics:
+## Principle 5: Raw Telemetry Preservation
 
-* High-frequency
-* Event-driven
-* Machine-generated
-* Write-heavy
-* Continuous
+TelemetrySample is the canonical dataset of the platform.
 
-Examples:
+Raw telemetry is retained indefinitely and serves as the source of truth for:
 
-* Voltage readings
-* Current measurements
-* Power calculations
-* Heartbeat messages
-
-### Business Workload
-
-Characteristics:
-
-* Low-frequency
-* User-driven
-* CRUD-oriented
-* Read-heavy
-
-Examples:
-
-* Create room
-* Configure channel
-* Assign labels
-* Define tariffs
-* View analytics
+- Historical analytics
+- Aggregation projections
+- Future anomaly detection
+- Future machine learning experiments
+- Consumption pattern analysis
 
 ---
 
@@ -166,341 +111,129 @@ Examples:
 
 ## Hybrid Telemetry and Business Architecture
 
-Telemetry ingestion and business configuration follow different communication patterns.
+Telemetry Flow:
 
-### Telemetry Flow
+ESP32 → MQTT → Mosquitto → Telemetry Ingestion Service → SQL Server
 
-```text
-ESP32
-    ↓ MQTT
-Mosquitto Broker
-    ↓
-Telemetry Ingestion Service
-    ↓
-SQL Server
-```
+Business Flow:
 
-### Business Configuration Flow
+Dashboard → REST API → SQL Server
 
-```text
-Dashboard
-    ↓ REST
-Energy Analytics API
-    ↓
-SQL Server
-```
-
-### Architectural Rationale
-
-Telemetry ingestion and business configuration have different characteristics.
-
-MQTT and a dedicated ingestion service are used for high-frequency telemetry workloads, while REST APIs handle low-frequency configuration and analytics workloads.
-
-Both services share a common data model and persist to SQL Server.
+Telemetry ingestion and business configuration use different communication patterns while sharing a common data model and database.
 
 ---
 
 # System Architecture
 
-```text
-                    ┌─────────────────────┐
-                    │  Web Dashboard      │
-                    └──────────┬──────────┘
-                               │ REST
-                               ▼
-                    ┌─────────────────────┐
-                    │ Energy Analytics    │
-                    │ API                 │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ SQL Server          │
-                    └──────────▲──────────┘
-                               │
-                               │ EF Core
-                               │
-                    ┌──────────┴──────────┐
-                    │ Telemetry Ingestion │
-                    │ Service             │
-                    └──────────▲──────────┘
-                               │ MQTT
-                               ▼
-                    ┌─────────────────────┐
-                    │ Mosquitto Broker    │
-                    └──────────▲──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ ESP32 + FreeRTOS    │
-                    │ Room Monitor        │
-                    └─────────────────────┘
-```
+Web Dashboard
+    ↓ REST
+Energy Analytics API
+    ↓
+SQL Server
+    ↑
+Telemetry Ingestion Service
+    ↑ MQTT
+Mosquitto Broker
+    ↑
+ESP32 + FreeRTOS
 
 ---
 
 # Solution Structure
 
-```text
 EnergyAnalytics.sln
 
-├── Energy.Domain
-│
-├── Energy.Infrastructure
-│
-├── Energy.TelemetryIngestion
-│
-├── Energy.API
-│
-└── Energy.Dashboard
-```
+- Energy.Domain
+- Energy.Infrastructure
+- Energy.TelemetryIngestion
+- Energy.API
+- Energy.Dashboard
 
 ---
 
 # Shared Infrastructure Layer
 
-The platform uses a shared infrastructure layer.
-
----
-
 ## Energy.Domain
 
 Contains:
 
-* Entities
-* Value Objects
-* Domain Models
-* Shared Contracts
-
-### Examples
-
-* Room
-* Channel
-* ChannelAssignment
-* TelemetryRaw
-* TelemetryHourly
-* DeviceHeartbeat
-
----
+- Room
+- Monitor
+- Channel
+- ChannelAssignment
+- TelemetrySample
+- TelemetryMinute
+- TelemetryHourly
+- TelemetryDaily
+- EnergyTariff
 
 ## Energy.Infrastructure
 
 Contains:
 
-* DbContext
-* EF Core Configurations
-* Repositories
-* Database Migrations
-
-Shared by:
-
-* Energy.TelemetryIngestion
-* Energy.API
+- DbContext
+- EF Core Configurations
+- Repositories
+- Database Migrations
 
 ---
 
 # Component Responsibilities
 
----
-
 ## ESP32 Room Monitor
 
-### Responsibilities
-
-* Sensor acquisition
-* Power calculations
-* Energy accumulation
-* MQTT publishing
-* Device health reporting
-
-### Technology
-
-* ESP32
-* FreeRTOS
-
----
-
-## Mosquitto Broker
-
-### Responsibilities
-
-* MQTT message transport
-* Topic routing
-* Reliable telemetry delivery
-
-### Technology
-
-* Mosquitto MQTT Broker
-
----
+- Sensor acquisition
+- Voltage/current measurement
+- Power calculation
+- MQTT publishing
+- Heartbeat reporting
 
 ## Telemetry Ingestion Service
 
-### Technology
+- MQTT subscriptions
+- Payload validation
+- Telemetry persistence
+- Heartbeat tracking
+- Minute aggregation generation
+- Hourly aggregation generation
+- Daily aggregation generation
+- Aggregation checkpoint management
 
-* .NET Worker Service
+Owns:
 
-### Responsibilities
-
-* MQTT subscriptions
-* Payload validation
-* Telemetry persistence
-* Heartbeat tracking
-* Telemetry aggregation
-* Future anomaly detection
-
-### Owns
-
-* TelemetryRaw
-* TelemetryMinute
-* TelemetryHourly
-* TelemetryDaily
-* DeviceHeartbeat
-
----
+- TelemetrySample
+- TelemetryMinute
+- TelemetryHourly
+- TelemetryDaily
+- AggregationCheckpoint
 
 ## Energy Analytics API
 
-### Technology
-
-* ASP.NET Core Web API
-
-### Responsibilities
-
-* Room management
-* Channel management
-* Channel assignment management
-* Energy tariff configuration
-* Dashboard APIs
-* Analytics APIs
-* Reporting APIs
-
-### Owns
-
-* Rooms
-* Channels
-* ChannelAssignments
-* EnergyTariffs
-* UserPreferences
-
----
-
-## SQL Server
-
-### Responsibilities
-
-* Persistent storage
-* Historical telemetry
-* Aggregated telemetry
-* Business configuration data
-
----
-
-## Dashboard
-
-### Responsibilities
-
-* Real-time monitoring
-* Historical visualization
-* Configuration management
-* Analytics presentation
-
----
-
-# Communication Patterns
-
----
-
-## MQTT
-
-Used for:
-
-* Telemetry ingestion
-* Device heartbeats
-* Future command topics
-
-### Example Topics
-
-```text
-energy/office/telemetry
-energy/livingroom/telemetry
-energy/kitchen/telemetry
-```
-
-### Rationale
-
-MQTT is optimized for lightweight, event-driven communication between embedded devices and backend services.
-
-The Energy Analytics API does not subscribe to MQTT topics.
-
-The Telemetry Ingestion Service is the sole telemetry consumer.
-
----
-
-## REST
-
-Used for:
-
-* Room management
-* Channel management
-* Assignment management
-* Analytics retrieval
-* Dashboard operations
-
-### Rationale
-
-REST is optimized for user-driven CRUD and reporting operations.
-
----
-
-# Embedded System Design
-
-## Platform
-
-ESP32
-
-## Operating System
-
-FreeRTOS
-
----
-
-## Initial Task Structure
-
-| Task             | Purpose                   | Frequency    |
-| ---------------- | ------------------------- | ------------ |
-| Sensor Task      | Read sensors              | 100 ms       |
-| Calculation Task | Compute power metrics     | 500 ms       |
-| MQTT Publisher   | Publish telemetry         | 1 sec        |
-| Health Task      | Diagnostics and heartbeat | 10 sec       |
-| OTA Task         | Future enhancement        | Event Driven |
+- Room management
+- Monitor management
+- Channel management
+- Channel assignment management
+- Energy tariff management
+- Analytics APIs
+- Reporting APIs
 
 ---
 
 # Telemetry Model
 
-The ESP32 publishes processed telemetry instead of raw sensor samples.
-
-### Example Payload
+Example payload:
 
 ```json
 {
   "schemaVersion": 1,
-  "monitorId": "office-01",
-  "roomId": "office",
-  "timestamp": "2026-05-30T18:30:00Z",
+  "monitorId": 1,
+  "timestampUtc": "2026-05-30T18:30:00Z",
   "channels": [
     {
       "channelId": 1,
-      "power": 220
-    },
-    {
-      "channelId": 2,
-      "power": 45
-    },
-    {
-      "channelId": 3,
-      "power": 12
+      "voltage": 127.3,
+      "current": 1.82,
+      "power": 231.6
     }
   ]
 }
@@ -508,207 +241,194 @@ The ESP32 publishes processed telemetry instead of raw sensor samples.
 
 ---
 
-# Data Model
+# Telemetry Aggregation Strategy
+
+TelemetrySample
+→ TelemetryMinute
+→ TelemetryHourly
+→ TelemetryDaily
+
+AggregationCheckpoint tracks aggregation progress and enables safe recovery after service interruptions.
 
 ---
+
+# Data Model
 
 ## Room
 
-| Field  |
-| ------ |
-| RoomId |
-| Name   |
-
----
+- Id
+- Name
+- CreatedAtUtc
 
 ## Monitor
 
-| Field           |
-| --------------- |
-| MonitorId       |
-| RoomId          |
-| FirmwareVersion |
-| LastHeartbeat   |
-
----
+- Id
+- RoomId
+- Name
+- FirmwareVersion
+- LastHeartbeat
+- CreatedAtUtc
 
 ## Channel
 
-| Field        |
-| ------------ |
-| ChannelId    |
-| MonitorId    |
-| PhysicalPort |
+- Id
+- MonitorId
+- PhysicalPort
+- CreatedAtUtc
 
----
+Unique Constraint:
+
+(MonitorId, PhysicalPort)
 
 ## ChannelAssignment
 
-| Field        |
-| ------------ |
-| AssignmentId |
-| ChannelId    |
-| Label        |
-| StartDate    |
-| EndDate      |
+- Id
+- ChannelId
+- Label
+- StartDateUtc
+- EndDateUtc
 
----
+Business Rule:
 
-## TelemetryRaw
+Only one active assignment may exist for a channel at a given point in time.
 
-| Field       |
-| ----------- |
-| TelemetryId |
-| ChannelId   |
-| Timestamp   |
-| Voltage     |
-| Current     |
-| Power       |
+## TelemetrySample
 
----
+- Id
+- ChannelId
+- TimestampUtc
+- Voltage
+- Current
+- Power
+- CreatedAtUtc
+
+Index:
+
+(ChannelId, TimestampUtc)
+
+## TelemetryMinute
+Minute-level analytics projection.
+
+- SampleCount
+- MinPower
+- MaxPower
+- AvgPower
+- EnergyConsumedWh
+
+
+Composite Key:
+
+(ChannelId, MinuteUtc)
 
 ## TelemetryHourly
 
-| Field          |
-| -------------- |
-| ChannelId      |
-| Hour           |
-| AveragePower   |
-| EnergyConsumed |
+Hourly analytics projection.
 
----
+- SampleCount
+- MinPower
+- MaxPower
+- AvgPower
+- EnergyConsumedWh
+
+Composite Key:
+
+(ChannelId, HourUtc)
 
 ## TelemetryDaily
 
-| Field          |
-| -------------- |
-| ChannelId      |
-| Date           |
-| EnergyConsumed |
-| EstimatedCost  |
+Daily analytics projection.
+
+- SampleCount
+- AvgPowerW
+- PeakPowerW
+- EnergyConsumedWh
+- EstimatedCost
+
+Composite Key:
+
+(ChannelId, DateUtc)
+
+## EnergyTariff
+
+- Id
+- Name
+- CostPerKWh
+- EffectiveFromUtc
+- EffectiveToUtc
+
+## AggregationCheckpoint
+
+- AggregationName
+- LastProcessedUtc
+- UpdatedAtUtc
 
 ---
 
 # MVP Scope
 
----
-
 ## Hardware
 
-### Included
+Included:
 
-* ESP32
-* FreeRTOS
-* Multi-channel monitoring
-* MQTT communication
-
-### Excluded
-
-* OTA updates
-* Device recognition
-* Multi-monitor deployments
-
----
+- ESP32
+- FreeRTOS
+- Multi-channel monitoring
+- MQTT communication
 
 ## Telemetry Ingestion Service
 
-### Included
+Included:
 
-* MQTT Consumer
-* Payload Validation
-* Telemetry Persistence
-* Heartbeat Monitoring
-* Aggregation Jobs
-
----
+- MQTT Consumer
+- Payload Validation
+- Telemetry Persistence
+- Heartbeat Monitoring
+- Aggregation Jobs
 
 ## Energy Analytics API
 
-### Included
+Included:
 
-* Room Management
-* Channel Management
-* Channel Assignments
-* Energy Tariff Management
-* Historical Queries
-
----
+- Room Management
+- Monitor Management
+- Channel Management
+- Channel Assignments
+- Energy Tariff Management
+- Historical Queries
 
 ## Dashboard
 
-### Included
+Included:
 
-#### Overview
-
-* Current total consumption
-* Room consumption
-* System health
-
-#### Channel View
-
-* Current outlet consumption
-* Assigned labels
-* Real-time telemetry
-
-#### Historical View
-
-* Daily consumption
-* Weekly consumption
-* Monthly consumption
-
-#### Configuration
-
-* Room setup
-* Channel naming
-* Energy tariff configuration
+- Real-time monitoring
+- Historical analytics
+- Configuration management
+- Cost reporting
 
 ---
 
-# Analytics Features (MVP)
+# Analytics Features
 
 ## Real-Time Monitoring
 
-Display:
+- Voltage (V)
+- Current (A)
+- Power (W)
 
-* Current Power (W)
-* Voltage (V)
-* Current (A)
+## Historical Analytics
 
----
-
-## Energy Consumption
-
-Display:
-
-* Daily kWh
-* Weekly kWh
-* Monthly kWh
-
----
+- Daily consumption
+- Weekly consumption
+- Monthly consumption
+- Peak consumption periods
 
 ## Cost Estimation
 
-User defines:
+Energy costs are calculated using active EnergyTariff configurations.
 
-```text
-Energy Price = R$/kWh
-```
+## Historical Assignment Awareness
 
-System calculates:
-
-* Daily cost
-* Monthly projection
-* Historical cost
-
----
-
-## Top Consumers
-
-Rank channels by:
-
-* Total energy consumption
-* Monthly consumption
-* Cost contribution
+Consumption is attributed using the assignment active at the time of measurement.
 
 ---
 
@@ -716,54 +436,39 @@ Rank channels by:
 
 ## Phase 2
 
-* Historical trend analysis
-* Room comparisons
-* Report exports
+- Historical trend analysis
+- Room comparisons
+- Report exports
 
 ## Phase 3
 
-* Anomaly detection
-* Phantom load detection
-* Consumption alerts
+- Consumption anomaly detection
+- Phantom load detection
+- Consumption alerts
 
 ## Phase 4
 
-* Device recognition
-* Machine learning classification
-* Predictive consumption forecasting
+- Consumption pattern clustering
+- Usage behavior classification
+- Device activity inference
+- Predictive consumption forecasting
 
 ## Phase 5
 
-* OTA firmware updates
-* Multi-room deployments
-* Remote access
-
----
-
-# Architectural Positioning
-
-This project intentionally demonstrates both IoT and backend engineering concepts.
-
-| Domain           | Technologies                                |
-| ---------------- | ------------------------------------------- |
-| Embedded Systems | ESP32, FreeRTOS                             |
-| IoT              | MQTT, Mosquitto                             |
-| Backend          | ASP.NET Core, Worker Services               |
-| Data             | SQL Server, EF Core                         |
-| Architecture     | Event-Driven Systems, Shared Infrastructure |
-| Analytics        | Aggregation, Cost Modeling                  |
+- OTA firmware updates
+- Multi-monitor deployments
+- Remote access
+- Advanced machine learning analytics
 
 ---
 
 # Success Criteria
 
-The project will be considered successful when:
-
 1. ESP32 publishes telemetry reliably through MQTT.
-2. The Telemetry Ingestion Service consumes and persists telemetry successfully.
-3. SQL Server stores both telemetry and business configuration data.
-4. The Energy Analytics API provides analytics and configuration endpoints.
-5. The dashboard displays real-time and historical consumption data.
-6. Users can assign and manage outlet labels.
-7. Energy cost estimation functions correctly.
-8. The solution demonstrates a complete Industrial IoT architecture suitable for a professional engineering portfolio.
+2. TelemetrySample records are persisted successfully.
+3. Aggregation projections are generated correctly.
+4. AggregationCheckpoint enables safe recovery after service interruptions.
+5. Energy tariffs support accurate cost estimation.
+6. Historical assignment tracking remains accurate over time.
+7. Dashboard displays real-time and historical analytics.
+8. The solution demonstrates a complete IoT telemetry platform suitable for future machine learning experimentation.
