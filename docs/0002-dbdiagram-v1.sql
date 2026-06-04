@@ -7,7 +7,8 @@ GO
 
 CREATE TABLE [monitor] (
   [Id] bigint PRIMARY KEY,
-  [RoomId] bigint NOT NULL,
+  [RoomId] bigint,
+  [DeviceIdentifier] nvarchar(20),
   [Name] nvarchar(100) NOT NULL,
   [FirmwareVersion] varchar(20),
   [LastHeartBeat] datetime2(3),

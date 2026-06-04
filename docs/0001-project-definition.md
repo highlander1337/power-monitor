@@ -263,6 +263,7 @@ AggregationCheckpoint tracks aggregation progress and enables safe recovery afte
 ## Monitor
 
 - Id
+- DeviceIdentifier
 - RoomId
 - Name
 - FirmwareVersion
