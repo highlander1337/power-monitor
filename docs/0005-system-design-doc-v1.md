@@ -1,4 +1,4 @@
-# System Design Iteration 01
+# System Design Iteration 02
 
 ## SD-001 — Define MQTT Topic Structure
 
@@ -137,10 +137,81 @@ Decision:
 
 ---
 
+
+### Q4 — Should the MQTT hierarchy include an application namespace?
+
+Two alternatives were evaluated.
+
+#### Option A — Generic Root Topics
+
+```text
+telemetry/{deviceIdentifier}
+
+heartbeat/{deviceIdentifier}
+```
+
+Advantages:
+
+* Shorter topic names.
+* Slightly simpler subscriptions.
+
+Disadvantages:
+
+* Topics become generic and less descriptive.
+* Difficult to share a broker with multiple applications.
+* Increases the risk of topic collisions.
+* Does not clearly identify the owning application domain.
+
+Decision:
+
+❌ Rejected
+
+---
+
+#### Option B — Application Namespace
+
+```text
+power-monitor/telemetry/{deviceIdentifier}
+
+power-monitor/heartbeat/{deviceIdentifier}
+```
+
+Advantages:
+
+* Clearly identifies the application domain.
+* Supports multiple applications sharing the same MQTT broker.
+* Reduces topic collision risks.
+* Aligns with MQTT topic hierarchy best practices.
+* Allows future expansion without restructuring the hierarchy.
+
+Example:
+
+```text
+power-monitor/telemetry/AABBCCDDEEFF
+
+power-monitor/heartbeat/AABBCCDDEEFF
+```
+
+Future extensions:
+
+```text
+power-monitor/command/{deviceIdentifier}
+
+power-monitor/configuration/{deviceIdentifier}
+
+power-monitor/firmware-update/{deviceIdentifier}
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
 ## Final Topic Hierarchy
 
 ```text
-mqtt/
+power-monitor/
 ├── telemetry/
 │   └── {deviceIdentifier}
 └── heartbeat/
@@ -150,10 +221,14 @@ mqtt/
 Examples:
 
 ```text
-mqtt/telemetry/AABBCCDDEEFF
+power-monitor/telemetry/AABBCCDDEEFF
 
-mqtt/heartbeat/AABBCCDDEEFF
+power-monitor/heartbeat/AABBCCDDEEFF
 ```
+
+The MQTT topic hierarchy should identify the application domain, message type, and device identity while remaining independent from business concepts such as rooms, monitor names, or channel assignments.
+
+This approach preserves routing stability and supports future system expansion without requiring topic redesign.
 
 ---
 
@@ -162,8 +237,8 @@ mqtt/heartbeat/AABBCCDDEEFF
 Telemetry Ingestion Service:
 
 ```text
-mqtt/telemetry/#
-mqtt/heartbeat/#
+power-monitor/telemetry/#
+power-monitor/heartbeat/#
 ```
 
 The service subscribes by message type and processes messages from all monitors.
@@ -233,7 +308,7 @@ When a new ESP32 device is powered on:
 2. The Telemetry Ingestion Service receives:
 
 ```text
-mqtt/heartbeat/AABBCCDDEEFF
+power-monitor/heartbeat/AABBCCDDEEFF
 ```
 
 3. The service attempts to locate the monitor using DeviceIdentifier.
@@ -371,9 +446,9 @@ through the DeviceIdentifier contained in the MQTT topic.
 ### MQTT Topic Hierarchy
 
 ```text
-mqtt/telemetry/{deviceIdentifier}
+power-monitor/telemetry/{deviceIdentifier}
 
-mqtt/heartbeat/{deviceIdentifier}
+power-monitor/heartbeat/{deviceIdentifier}
 ```
 
 ### Device Registration Strategy
