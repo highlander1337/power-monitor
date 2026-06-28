@@ -33,6 +33,15 @@ CREATE TABLE [channelAssignment] (
 )
 GO
 
+CREATE TABLE [energyTariff] (
+  [Id] bigint PRIMARY KEY,
+  [Name] nvarchar(100) NOT NULL,
+  [CostPerKWh] decimal(10,4) NOT NULL,
+  [EffectiveFromUtc] datetime2(3) NOT NULL,
+  [EffectiveToUtc] datetime2(3)
+)
+GO
+
 CREATE TABLE [telemetrySample] (
   [Id] bigint PRIMARY KEY,
   [ChannelId] bigint NOT NULL,
@@ -51,6 +60,13 @@ CREATE TABLE [telemetryRejection] (
   [Reason] nvarchar(200) NOT NULL,
   [Payload] nvarchar(max) NOT NULL,
   [CreatedAtUtc] datetime2(3) NOT NULL
+)
+GO
+
+CREATE TABLE [aggregationCheckpoint] (
+  [AggregationName] varchar(50) PRIMARY KEY,
+  [LastProcessedUtc] datetime2(3) NOT NULL,
+  [UpdatedAtUtc] datetime2(3) NOT NULL
 )
 GO
 
@@ -82,27 +98,11 @@ CREATE TABLE [telemetryDaily] (
   [ChannelId] bigint,
   [DateUtc] date,
   [SampleCount] int NOT NULL,
-  [AvgPowerW] decimal(10,3) NOT NULL,
-  [PeakPowerW] decimal(10,3) NOT NULL,
+  [MinPower] decimal(10,3) NOT NULL,
+  [MaxPower] decimal(10,3) NOT NULL,
+  [AvgPower] decimal(10,3) NOT NULL,
   [EnergyConsumedWh] decimal(12,4) NOT NULL,
-  [EstimatedCost] decimal(12,4) NOT NULL,
   PRIMARY KEY ([ChannelId], [DateUtc])
-)
-GO
-
-CREATE TABLE [energyTariff] (
-  [Id] bigint PRIMARY KEY,
-  [Name] nvarchar(100) NOT NULL,
-  [CostPerKWh] decimal(10,4) NOT NULL,
-  [EffectiveFromUtc] datetime2(3) NOT NULL,
-  [EffectiveToUtc] datetime2(3)
-)
-GO
-
-CREATE TABLE [aggregationCheckpoint] (
-  [AggregationName] varchar(50) PRIMARY KEY,
-  [LastProcessedUtc] datetime2(3) NOT NULL,
-  [UpdatedAtUtc] datetime2(3) NOT NULL
 )
 GO
 

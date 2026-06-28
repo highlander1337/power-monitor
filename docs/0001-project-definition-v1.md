@@ -49,8 +49,8 @@ Create a room-based energy monitoring platform that:
 4. Estimates energy costs using configurable energy tariffs.
 5. Enables users to assign meaningful labels to monitored outlets.
 6. Preserves assignment history through time-based outlet assignments.
-7. Generates minute, hourly, and daily analytical projections.
-8. Supports future expansion into anomaly detection, usage pattern analysis, and machine learning experimentation.
+7. Generates disposable minute, hourly, and daily analytical projections from the permanent telemetry dataset.
+8. Preserves raw telemetry as the system of record to support future anomaly detection, usage pattern analysis, and machine learning experimentation.
 
 ---
 
@@ -105,6 +105,14 @@ Raw telemetry is retained indefinitely and serves as the source of truth for:
 - Future machine learning experiments
 - Consumption pattern analysis
 
+## Principle 6: Disposable Analytics Projections
+
+Analytics projections are derived exclusively from TelemetrySample, which serves as the system of record.
+
+Minute, hourly, and daily projections are considered disposable and may be regenerated at any time from raw telemetry.
+
+This design simplifies recovery, supports late-arriving telemetry, and allows aggregation algorithms to evolve without risking historical data loss.
+
 ---
 
 # Architecture Decision
@@ -113,29 +121,62 @@ Raw telemetry is retained indefinitely and serves as the source of truth for:
 
 Telemetry Flow:
 
-ESP32 → MQTT → Mosquitto → Telemetry Ingestion Service → SQL Server
+```
+ESP32 + FreeRTOS
+    ↓
+MQTT Broker
+    ↓
+Telemetry Ingestion Service
+    ↓
+TelemetrySample
+    ↓
+Telemetry Aggregation Service
+    ↓
+TelemetryMinute
+TelemetryHourly
+TelemetryDaily
+```
 
 Business Flow:
 
+```
 Dashboard → REST API → SQL Server
+```
 
 Telemetry ingestion and business configuration use different communication patterns while sharing a common data model and database.
+
+# Projection Strategy
+
+The platform distinguishes between permanent telemetry observations and disposable analytical projections.
+
+TelemetrySample is the only permanent telemetry dataset and serves as the system of record.
+
+Minute, hourly and daily projections are regenerated from TelemetrySample and exist solely to improve query performance.
+
+Business information, such as energy cost estimation, is intentionally excluded from the aggregation layer and calculated by the Energy Analytics API.
 
 ---
 
 # System Architecture
 
-Web Dashboard
-    ↓ REST
-Energy Analytics API
-    ↓
-SQL Server
-    ↑
-Telemetry Ingestion Service
-    ↑ MQTT
-Mosquitto Broker
-    ↑
-ESP32 + FreeRTOS
+```
+    Web Dashboard
+            ↓ REST
+    Energy Analytics API
+            ↓
+        SQL Server
+        ↑     ↑
+        │     │
+    Telemetry   Telemetry
+    Aggregation Ingestion
+    Service      Service
+        ↑
+    TelemetrySample
+        ↑
+    MQTT Broker
+        ↑
+    ESP32 + FreeRTOS
+```
 
 ---
 
@@ -146,6 +187,7 @@ EnergyAnalytics.sln
 - Energy.Domain
 - Energy.Infrastructure
 - Energy.TelemetryIngestion
+- Energy.TelemetryAggregation
 - Energy.API
 - Energy.Dashboard
 
@@ -191,17 +233,31 @@ Contains:
 ## Telemetry Ingestion Service
 
 - MQTT subscriptions
-- Payload validation
+- Telemetry contract validation
+- Heartbeat contract validation
+- Automatic monitor registration
 - Telemetry persistence
 - Heartbeat tracking
-- Minute aggregation generation
-- Hourly aggregation generation
-- Daily aggregation generation
-- Aggregation checkpoint management
+- Operational failure persistence
 
 Owns:
 
+- Monitor
+- Channel
 - TelemetrySample
+- TelemetryRejection
+
+## Telemetry Aggregation Service
+
+- Generates minute projections
+- Generates hourly projections
+- Generates daily projections
+- Maintains aggregation checkpoints
+- Rebuilds disposable projections
+- Recomputes projections when late telemetry arrives
+
+Owns:
+
 - TelemetryMinute
 - TelemetryHourly
 - TelemetryDaily
@@ -216,6 +272,8 @@ Owns:
 - Energy tariff management
 - Analytics APIs
 - Reporting APIs
+- Business calculations
+- Cost estimation
 
 ---
 
@@ -225,17 +283,11 @@ Example payload:
 
 ```json
 {
-  "schemaVersion": 1,
-  "monitorId": 1,
   "timestampUtc": "2026-05-30T18:30:00Z",
-  "channels": [
-    {
-      "channelId": 1,
-      "voltage": 127.3,
-      "current": 1.82,
-      "power": 231.6
-    }
-  ]
+  "physicalPort": 1,
+  "voltageVrms": 127.3,
+  "currentArms": 1.82,
+  "powerW": 231.6
 }
 ```
 
@@ -243,10 +295,17 @@ Example payload:
 
 # Telemetry Aggregation Strategy
 
+```
 TelemetrySample
-→ TelemetryMinute
-→ TelemetryHourly
-→ TelemetryDaily
+        │
+        ├──► TelemetryMinute
+        │
+        ├──► TelemetryHourly
+        │
+        └──► TelemetryDaily
+```
+
+All aggregation projections are derived directly from TelemetrySample. The Telemetry Aggregation Service treats TelemetrySample as the system of record. Minute, hourly and daily projections are independent disposable views and may be regenerated at any time.
 
 AggregationCheckpoint tracks aggregation progress and enables safe recovery after service interruptions.
 
@@ -267,7 +326,7 @@ AggregationCheckpoint tracks aggregation progress and enables safe recovery afte
 - RoomId
 - Name
 - FirmwareVersion
-- LastHeartbeat
+- LastHeartbeatUtc
 - CreatedAtUtc
 
 ## Channel
@@ -303,9 +362,21 @@ Only one active assignment may exist for a channel at a given point in time.
 - Power
 - CreatedAtUtc
 
-Index:
+Unique Constraint
 
 (ChannelId, TimestampUtc)
+
+## TelemetryRejection
+
+Operational telemetry persistence.
+
+Stores messages rejected during ingestion.
+
+- DeviceIdentifier
+- Topic
+- Reason
+- Payload
+- CreatedAtUtc
 
 ## TelemetryMinute
 Minute-level analytics projection.
@@ -340,10 +411,10 @@ Composite Key:
 Daily analytics projection.
 
 - SampleCount
-- AvgPowerW
-- PeakPowerW
+- MinPower
+- MaxPower
+- AvgPower
 - EnergyConsumedWh
-- EstimatedCost
 
 Composite Key:
 
@@ -381,10 +452,20 @@ Included:
 Included:
 
 - MQTT Consumer
-- Payload Validation
+- Contract Validation
+- Automatic Registration
 - Telemetry Persistence
-- Heartbeat Monitoring
-- Aggregation Jobs
+- Operational Failure Persistence
+
+## Telemetry Aggregation Service
+
+Included:
+
+- Minute Aggregation
+- Hourly Aggregation
+- Daily Aggregation
+- Checkpoint Management
+- Projection Rebuild
 
 ## Energy Analytics API
 
@@ -425,7 +506,9 @@ Included:
 
 ## Cost Estimation
 
-Energy costs are calculated using active EnergyTariff configurations.
+Energy costs are calculated by the Energy Analytics API using aggregated energy consumption together with the applicable EnergyTariff.
+
+The Telemetry Aggregation Service remains independent from business pricing rules.
 
 ## Historical Assignment Awareness
 
@@ -467,9 +550,13 @@ Consumption is attributed using the assignment active at the time of measurement
 
 1. ESP32 publishes telemetry reliably through MQTT.
 2. TelemetrySample records are persisted successfully.
-3. Aggregation projections are generated correctly.
-4. AggregationCheckpoint enables safe recovery after service interruptions.
-5. Energy tariffs support accurate cost estimation.
-6. Historical assignment tracking remains accurate over time.
-7. Dashboard displays real-time and historical analytics.
-8. The solution demonstrates a complete IoT telemetry platform suitable for future machine learning experimentation.
+3. Raw telemetry is preserved as the permanent system of record.
+4. Minute, hourly and daily projections are generated correctly from TelemetrySample.
+5. Projection tables can be safely rebuilt from raw telemetry.
+6. AggregationCheckpoint enables resumable aggregation after interruptions.
+7. Late-arriving telemetry correctly triggers retroactive projection recomputation.
+8. The Energy Analytics API produces business metrics independently from telemetry aggregation.
+9. Energy tariffs support accurate cost estimation.
+10. Historical assignment tracking remains accurate over time.
+11. Dashboard displays real-time and historical analytics.
+12. The solution demonstrates a complete IoT telemetry platform suitable for future machine learning experimentation.

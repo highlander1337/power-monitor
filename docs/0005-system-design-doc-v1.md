@@ -2323,3 +2323,433 @@ Monitor Registration = Atomic
 Topology = Immutable After Registration
 
 Validation Failures = Operational Data
+```
+
+# SD-005 — Design Telemetry Aggregation Service
+
+## Objective
+
+Define the architecture, responsibilities, aggregation strategy, checkpoint strategy, and recovery model of the Telemetry Aggregation Service.
+
+Unlike the Telemetry Ingestion Service, whose responsibility is to preserve device observations, the Telemetry Aggregation Service transforms historical telemetry into disposable time-window projections optimized for analytical queries.
+
+---
+
+## Acceptance Criteria
+
+* Minute aggregation defined.
+* Hourly aggregation defined.
+* Daily aggregation defined.
+* Checkpoint strategy defined.
+
+---
+
+## Design Inputs
+
+SD-005 builds upon the architectural decisions established in previous iterations.
+
+| Source | Adopted Decision                                            |
+| ------ | ----------------------------------------------------------- |
+| SD-004 | `TelemetrySample` is the permanent system of record.        |
+| SD-004 | Aggregation is implemented as an independent service.       |
+| SD-004 | Projection tables are disposable and may be rebuilt.        |
+| SD-004 | `AggregationCheckpoint` represents optimization state only. |
+| SD-004 | MQTT delivery guarantee is *At Least Once*.                 |
+| SD-004 | Telemetry persistence is idempotent.                        |
+| SD-002 | Device timestamps (`TimestampUtc`) are authoritative.       |
+
+These decisions are considered fixed and are not revisited by this iteration.
+
+---
+
+# Design Questions
+
+## Q1 — What is the source of truth for aggregation?
+
+Several alternatives were considered.
+
+### Option A — Hierarchical Aggregation
+
+```text
+TelemetrySample
+        ↓
+TelemetryMinute
+        ↓
+TelemetryHourly
+        ↓
+TelemetryDaily
+```
+
+Advantages
+
+* Lower computational cost.
+
+Disadvantages
+
+* Errors propagate through multiple projection levels.
+* Projection tables become dependencies for other projections.
+* Rebuilding requires intermediate stages.
+
+Decision:
+
+❌ Rejected
+
+---
+
+### Option B — Direct Aggregation
+
+```text
+TelemetrySample
+        │
+        ├──► TelemetryMinute
+        ├──► TelemetryHourly
+        └──► TelemetryDaily
+```
+
+Advantages
+
+* Single source of truth.
+* Independent projections.
+* Simplified rebuild strategy.
+* No accumulation of aggregation errors.
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+TelemetrySample is the only source of truth for all aggregation windows.
+```
+
+---
+
+## Q2 — How are aggregation windows defined?
+
+Aggregation windows are determined exclusively by the telemetry timestamp reported by the monitoring device.
+
+Examples:
+
+| Telemetry Timestamp | Minute Window | Hour Window | Day Window |
+| ------------------- | ------------- | ----------- | ---------- |
+| 12:01:37            | 12:01:00      | 12:00:00    | 2026-05-30 |
+| 12:59:59            | 12:59:00      | 12:00:00    | 2026-05-30 |
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+Aggregation windows are normalized using TimestampUtc rather than ingestion time.
+```
+
+---
+
+## Q3 — How should energy consumption be calculated?
+
+Two alternatives were considered.
+
+### Option A — Average Power × Window Duration
+
+```text
+EnergyConsumedWh =
+AveragePower × WindowDuration
+```
+
+Advantages
+
+* Simple implementation.
+
+Disadvantages
+
+* Assumes fixed sampling frequency.
+* Produces inaccurate results for sparse telemetry.
+* Does not support delayed telemetry correctly.
+
+Decision:
+
+❌ Rejected
+
+---
+
+### Option B — Numerical Integration
+
+Energy consumption is computed by integrating power over time.
+
+Conceptually:
+
+```text
+Energy =
+Σ(Power × ΔTime)
+```
+
+Each telemetry observation is assumed to remain valid until the next observation.
+
+Advantages
+
+* Independent of sampling frequency.
+* Supports offline buffering.
+* Correctly handles delayed telemetry.
+* Produces mathematically consistent energy estimates.
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+EnergyConsumedWh is computed from the area under the power curve represented by TelemetrySample observations.
+```
+
+---
+
+## Q4 — Which metrics belong in each projection?
+
+Three alternatives were evaluated.
+
+### Option A — Different projection schemas
+
+Decision:
+
+❌ Rejected
+
+---
+
+### Option B — Identical telemetry projections
+
+Each projection contains:
+
+```text
+SampleCount
+
+MinPower
+MaxPower
+AvgPower
+
+EnergyConsumedWh
+```
+
+Only the aggregation window changes.
+
+| Projection      | Window   |
+| --------------- | -------- |
+| TelemetryMinute | 1 minute |
+| TelemetryHourly | 1 hour   |
+| TelemetryDaily  | 1 day    |
+
+Decision:
+
+✅ Accepted
+
+---
+
+### Option C — Telemetry plus business metrics
+
+Examples:
+
+```text
+EstimatedCost
+TariffApplied
+CarbonEmission
+```
+
+Decision:
+
+❌ Rejected
+
+---
+
+## Architectural Principle
+
+```text
+The Telemetry Aggregation Service generates only telemetry-derived metrics.
+```
+
+Business metrics are generated by downstream services.
+
+---
+
+## Q5 — How are aggregation checkpoints managed?
+
+A checkpoint is maintained independently for each projection.
+
+Example:
+
+| Aggregation | LastProcessedUtc |
+| ----------- | ---------------- |
+| Minute      | ...              |
+| Hourly      | ...              |
+| Daily       | ...              |
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+Aggregation checkpoints represent optimization state rather than permanent data.
+```
+
+If lost, projections may be regenerated from `TelemetrySample`.
+
+---
+
+## Q6 — How should aggregation progress?
+
+Two alternatives were considered.
+
+### Option A — Large Batch Processing
+
+Decision:
+
+❌ Rejected
+
+---
+
+### Option B — Window-by-Window Processing
+
+The aggregation service evaluates one aggregation window at a time.
+
+```text
+Checkpoint
+      ↓
+Read Window
+      ↓
+Aggregate
+      ↓
+Persist Projection
+      ↓
+Advance Checkpoint
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+Aggregation progresses one completed window at a time.
+```
+
+---
+
+## Q7 — How should late telemetry be handled?
+
+Telemetry may arrive after projections have already been generated because monitoring devices may temporarily buffer observations while offline.
+
+Example:
+
+```text
+Projection Generated
+        ↓
+Late Telemetry Arrives
+        ↓
+Affected Window Identified
+        ↓
+Projection Recomputed
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+Projection correctness takes precedence over processing order.
+```
+
+Late-arriving telemetry triggers recomputation of the affected aggregation windows.
+
+---
+
+## Q8 — How are projections rebuilt?
+
+Recovery strategy:
+
+```text
+Delete Projection
+        ↓
+Reset Checkpoint
+        ↓
+Replay TelemetrySample
+```
+
+The same mechanism is used for:
+
+* Service recovery.
+* Projection corruption.
+* Aggregation algorithm improvements.
+* Historical telemetry replay.
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+Projection rebuild is a normal operational capability rather than an exceptional recovery procedure.
+```
+
+---
+
+# Final Aggregation Architecture
+
+```text
+TelemetrySample
+        │
+        ├──► TelemetryMinute
+        ├──► TelemetryHourly
+        └──► TelemetryDaily
+                │
+                ▼
+      Energy Analytics API
+                │
+                ▼
+      Business Metrics
+```
+
+---
+
+# Architectural Principles Summary
+
+```text
+TelemetrySample = System of Record
+
+Aggregations are Window-Based
+
+Projections are Independent
+
+Projections are Disposable
+
+Energy is Computed by Numerical Integration
+
+Aggregation Uses Device Time
+
+Checkpoint = Optimization State
+
+Late Telemetry Triggers Projection Recalculation
+
+Business Metrics Are Not Aggregation Responsibilities
+```
