@@ -371,7 +371,11 @@ MQTT Message
       ↓
 Validate
       ↓
-Execute Atomic Operation
+Begin Transaction
+      ↓
+Persist Domain Data
+      ↓
+Persist Outbox Event Intent
       ↓
 Commit
       ↓
@@ -792,3 +796,595 @@ Topology = Immutable After Registration
 
 Validation Failures = Operational Data
 ```
+
+---
+
+## AR-003 Alignment — Durable Telemetry Persistence Notification
+
+### Context
+
+SD-004 established the Telemetry Ingestion Service as the boundary responsible for:
+
+```text
+Receive
+Validate
+Register
+Persist
+Acknowledge
+```
+
+SD-005 later established that analytical projections are disposable and may need to be recomputed when late telemetry changes a previously processed aggregation window.
+
+The cross-iteration architecture review identified a detection gap:
+
+```text
+Late Telemetry Persisted
+        ↓
+Previously Processed Window Becomes Stale
+        ↓
+Aggregation Service Must Discover the Change
+```
+
+A forward-moving aggregation checkpoint cannot, by itself, discover that an older window has become stale.
+
+AR-003 resolved this gap through durable event notification.
+
+---
+
+# Q — How should persisted telemetry notify downstream aggregation?
+
+## Option A — `CreatedAtUtc` overlap scan
+
+The Telemetry Aggregation Service periodically scans newly persisted telemetry and derives affected historical windows.
+
+Advantages:
+
+- Uses existing telemetry data.
+- Requires no event notification contract.
+
+Disadvantages:
+
+- Requires an additional scan watermark.
+- Couples detection latency to polling frequency.
+- Repeated scans may rediscover the same stale windows.
+
+Decision:
+
+❌ Rejected
+
+---
+
+## Option B — Dirty-window table
+
+The Telemetry Ingestion Service records minute, hourly, and daily windows that require recomputation.
+
+Advantages:
+
+- Explicit invalidation state.
+- Efficient targeted recomputation.
+
+Disadvantages:
+
+- Makes ingestion aware of aggregation window semantics.
+- Couples ingestion to minute, hourly, and daily projection design.
+- Weakens separation of concerns.
+
+Decision:
+
+❌ Rejected
+
+---
+
+## Option C — Event notification
+
+After telemetry is durably persisted, the system emits a notification representing the newly available observation.
+
+Conceptually:
+
+```text
+Telemetry Persisted
+        ↓
+Durable Event Intent Recorded
+        ↓
+Event Published
+        ↓
+Telemetry Aggregation Service
+        ↓
+Affected Windows Derived
+        ↓
+Required Projections Recomputed
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+# Architectural Principle
+
+```text
+The Telemetry Ingestion Service announces durable observation availability.
+
+The Telemetry Aggregation Service decides which analytical projections are affected.
+```
+
+The ingestion boundary does not emit commands such as:
+
+```text
+Recompute Minute 12:15
+Recompute Hour 12:00
+Recompute Day 2026-05-30
+```
+
+Those decisions remain owned by the Telemetry Aggregation Service.
+
+---
+
+# Telemetry Persisted Event
+
+A conceptual event contains enough information for downstream consumers to identify the persisted observation and derive affected windows.
+
+Example:
+
+```json
+{
+  "telemetrySampleId": 123456,
+  "channelId": 42,
+  "timestampUtc": "2026-05-30T12:15:30Z",
+  "persistedAtUtc": "2026-05-30T14:30:00Z"
+}
+```
+
+The event communicates:
+
+```text
+A telemetry observation now exists durably.
+```
+
+It does not communicate business interpretation or projection commands.
+
+The exact event envelope and transport technology remain separate implementation decisions.
+
+---
+
+# Q — How is event publication made reliable?
+
+## Rejected naive dual-write
+
+A naive flow would be:
+
+```text
+Persist TelemetrySample
+        ↓
+Commit SQL Transaction
+        ↓
+Publish Event
+```
+
+This creates a failure window:
+
+```text
+TelemetrySample committed
+        ↓
+Process crashes
+        ↓
+Event never published
+```
+
+The observation would exist durably, but downstream aggregation might never discover that a historical projection became stale.
+
+Decision:
+
+❌ Rejected
+
+---
+
+## Accepted strategy — Durable Outbox
+
+Telemetry persistence and event intent are committed atomically.
+
+```text
+Begin Transaction
+        ↓
+Insert TelemetrySample
+        ↓
+Insert OutboxMessage
+        ↓
+Commit Transaction
+        ↓
+Acknowledge MQTT Broker
+```
+
+A separate publisher process performs:
+
+```text
+Read Pending Outbox Messages
+        ↓
+Publish Event
+        ↓
+Mark Outbox Message as Published
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+# Updated Transaction Boundary
+
+The accepted SD-004 transaction boundary becomes:
+
+```text
+MQTT Message
+      ↓
+Validate
+      ↓
+Begin Transaction
+      ↓
+Execute Atomic Domain Operation
+      ↓
+Persist Outbox Event Intent When New Telemetry Is Created
+      ↓
+Commit
+      ↓
+Acknowledge Broker
+```
+
+For telemetry persistence specifically:
+
+```text
+MQTT Telemetry Message
+      ↓
+Validate Contract
+      ↓
+Resolve Monitor
+      ↓
+Resolve Channel
+      ↓
+Begin Transaction
+      ├── Insert TelemetrySample
+      └── Insert OutboxMessage
+      ↓
+Commit
+      ↓
+Acknowledge Broker
+```
+
+The database transaction guarantees:
+
+```text
+TelemetrySample persisted
++
+Event publication intent persisted
+```
+
+or:
+
+```text
+Neither persisted
+```
+
+---
+
+# Registration Transaction Boundary
+
+The previously accepted registration rule remains unchanged.
+
+Heartbeat-driven registration is atomic:
+
+```text
+Heartbeat Received
+      ↓
+Unknown Device
+      ↓
+Begin Transaction
+      ├── Create Monitor
+      └── Create Channels
+      ↓
+Commit
+```
+
+If any registration operation fails:
+
+```text
+Rollback Everything
+```
+
+AR-003 does not require monitor registration to emit a telemetry-persisted event.
+
+---
+
+# Validation Failure Boundary
+
+The previously accepted validation behavior remains unchanged.
+
+Invalid telemetry or heartbeat messages are:
+
+```text
+Rejected
++
+Persisted as Operational Traceability Data
+```
+
+using:
+
+```text
+TelemetryRejection
+```
+
+A rejected message does not produce a `TelemetryPersisted` event because no valid telemetry observation was created.
+
+---
+
+# Duplicate Telemetry Semantics
+
+SD-004 established at-least-once MQTT delivery and database idempotency through:
+
+```text
+UNIQUE (
+    ChannelId,
+    TimestampUtc
+)
+```
+
+Duplicate telemetry remains:
+
+```text
+Not a validation failure
+```
+
+When a duplicate delivery is detected:
+
+```text
+Existing TelemetrySample
+        ↓
+No New TelemetrySample Inserted
+        ↓
+No New TelemetryPersisted Event Intent Required
+```
+
+This prevents broker redelivery from creating semantically new observation notifications.
+
+---
+
+# MQTT Acknowledgement Rule
+
+The accepted ordering remains:
+
+```text
+Commit
+    ↓
+Acknowledge Broker
+```
+
+With the outbox strategy, commit now includes durable event intent.
+
+Therefore:
+
+```text
+TelemetrySample
++
+OutboxMessage
+```
+
+must be committed before the MQTT message is acknowledged.
+
+If the transaction fails:
+
+```text
+No Commit
+    ↓
+No Broker Acknowledgement
+    ↓
+Message Remains Eligible for Redelivery
+```
+
+---
+
+# Event Delivery Semantics
+
+The internal event boundary must tolerate:
+
+```text
+At Least Once Delivery
+```
+
+Therefore downstream consumers must be idempotent.
+
+The Telemetry Aggregation Service may receive the same persisted-observation event more than once without corrupting projections.
+
+This aligns with the broader system reliability model:
+
+```text
+MQTT Delivery
+=
+At Least Once
+```
+
+```text
+Internal Event Delivery
+=
+At Least Once Compatible
+```
+
+```text
+Persistence and Projection Operations
+=
+Idempotent
+```
+
+---
+
+# Updated Service Responsibilities
+
+The Telemetry Ingestion Service is responsible for:
+
+```text
+Receive MQTT Messages
+Validate Contracts
+Register Devices
+Resolve Channels
+Persist Telemetry
+Persist Validation Rejections
+Record Durable Event Intent
+Acknowledge Broker After Commit
+```
+
+The service is not responsible for:
+
+```text
+Determine Stale Aggregation Windows
+Generate Minute Projections
+Generate Hourly Projections
+Generate Daily Projections
+Calculate Business Metrics
+Forecast
+Manage User Configuration
+```
+
+---
+
+# Updated Service Outputs
+
+The service produces or maintains:
+
+```text
+Monitor
+Channel
+TelemetrySample
+TelemetryRejection
+OutboxMessage
+```
+
+`OutboxMessage` is operational integration state. It is not business data and is not a public API resource.
+
+---
+
+# Failure Recovery Consequences
+
+## Ingestion process crashes before commit
+
+Result:
+
+```text
+TelemetrySample not committed
+OutboxMessage not committed
+MQTT message not acknowledged
+```
+
+The broker may redeliver the message.
+
+---
+
+## Ingestion process crashes after commit but before MQTT acknowledgement
+
+Result:
+
+```text
+TelemetrySample committed
+OutboxMessage committed
+MQTT message may be redelivered
+```
+
+The unique telemetry constraint prevents duplicate observation creation.
+
+No new event intent is required for the duplicate.
+
+---
+
+## Process crashes after commit but before event publication
+
+Result:
+
+```text
+TelemetrySample committed
+OutboxMessage pending
+```
+
+The outbox publisher later resumes publication.
+
+The event intent is not lost.
+
+---
+
+## Event is published more than once
+
+Result:
+
+```text
+Aggregation consumer receives duplicate notification
+```
+
+The Telemetry Aggregation Service must process notifications idempotently.
+
+---
+
+# Database Consequence
+
+The persistence model requires an outbox table.
+
+Conceptual structure:
+
+```text
+OutboxMessage
+-------------
+Id
+EventType
+Payload
+CreatedAtUtc
+PublishedAtUtc
+```
+
+The exact schema, indexing strategy, retry metadata, and event transport remain implementation-level refinements unless separately promoted into system-design decisions.
+
+---
+
+# Consequences for SD-005
+
+SD-005 gains an additional service input:
+
+```text
+Telemetry Persisted Events
+```
+
+The Telemetry Aggregation Service uses the event observation timestamp to derive potentially affected:
+
+```text
+Minute Window
+Hourly Window
+Daily Window
+```
+
+The ingestion service remains unaware of those projection semantics.
+
+---
+
+# Final Decision Summary
+
+| Decision | Result |
+|---|---|
+| Late telemetry notification | Event-driven |
+| Event intent durability | Outbox Pattern |
+| Telemetry + event intent | Same database transaction |
+| MQTT acknowledgement | After commit |
+| Projection-window derivation | Aggregation Service |
+| Duplicate telemetry | Not a validation failure |
+| Duplicate telemetry event | No new event required when no new sample is inserted |
+| Event delivery | At-least-once compatible |
+| Aggregation consumer | Idempotent |
+| Event transport technology | Deferred |
+
+---
+
+# Final Architectural Principle
+
+```text
+The Telemetry Ingestion Service atomically preserves valid observations and durable notification intent.
+
+It announces that telemetry exists.
+
+It does not decide what analytics must be recomputed.
+```
+
