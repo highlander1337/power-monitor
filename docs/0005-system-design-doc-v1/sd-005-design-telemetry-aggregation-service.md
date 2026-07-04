@@ -426,3 +426,1199 @@ Late Telemetry Triggers Projection Recalculation
 
 Business Metrics Are Not Aggregation Responsibilities
 ```
+
+---
+
+## Cross-Iteration Alignment — AR-002, AR-003, and AR-004
+
+### Context
+
+SD-005 originally established the Telemetry Aggregation Service as a separate service responsible for generating disposable analytical projections from `TelemetrySample`.
+
+Subsequent cross-iteration architecture review resolved four upstream issues that affect the aggregation contract:
+
+```text
+AR-001
+powerW is mandatory in Telemetry Contract V1
+
+AR-002
+Energy integration uses available telemetry observations
+without manufacturing missing telemetry
+
+AR-003
+Late telemetry is detected through durable event notification
+
+AR-004
+Aggregation windows use half-open UTC intervals
+```
+
+This section updates SD-005 to incorporate those accepted decisions.
+
+---
+
+# Updated Service Boundary
+
+The Telemetry Aggregation Service remains separate from the Telemetry Ingestion Service.
+
+```text
+Telemetry Ingestion Service
+        ↓
+TelemetrySample
+        +
+Durable Telemetry Persisted Event
+        ↓
+Telemetry Aggregation Service
+        ↓
+Disposable Analytical Projections
+```
+
+The Aggregation Service owns:
+
+```text
+Minute Aggregation
+Hourly Aggregation
+Daily Aggregation
+Aggregation Checkpoints
+Late-Telemetry Recalculation
+Projection Completeness
+```
+
+The Aggregation Service does not own:
+
+```text
+MQTT Consumption
+Telemetry Contract Validation
+Monitor Registration
+Channel Registration
+Business Cost Calculation
+Tariff Interpretation
+Forecasting
+Machine Learning
+```
+
+---
+
+# Updated Inputs from SD-004
+
+SD-004 established two inputs relevant to SD-005.
+
+## Input 1 — `TelemetrySample`
+
+`TelemetrySample` remains the canonical source of truth for all analytical projections.
+
+Decision:
+
+✅ Accepted
+
+```text
+TelemetrySample
+        ↓
+TelemetryMinute
+
+TelemetrySample
+        ↓
+TelemetryHourly
+
+TelemetrySample
+        ↓
+TelemetryDaily
+```
+
+Minute and hourly projections are not canonical sources for higher-level projections.
+
+The service may use existing projections as an implementation optimization only if the resulting semantics remain equivalent to recomputation from `TelemetrySample`. The architectural source of truth remains `TelemetrySample`.
+
+---
+
+## Input 2 — Durable Telemetry Persisted Event
+
+AR-003 updates SD-004 so that newly persisted telemetry produces durable event intent through an outbox transaction.
+
+Conceptually:
+
+```text
+TelemetrySample Persisted
+        ↓
+Outbox Event Intent Persisted
+        ↓
+Event Published
+        ↓
+Telemetry Aggregation Service
+```
+
+The event communicates:
+
+```text
+A telemetry observation now exists durably.
+```
+
+It does not command a specific projection recomputation.
+
+The Aggregation Service derives affected windows from the observation timestamp.
+
+---
+
+# AR-002 — Numerical Integration Semantics
+
+## Q — How is `EnergyConsumedWh` calculated?
+
+### Option A — Average power multiplied by fixed window duration
+
+Example:
+
+```text
+EnergyConsumedWh
+=
+AvgPowerW × FixedWindowHours
+```
+
+Advantages:
+
+- Simple.
+- Computationally inexpensive.
+
+Disadvantages:
+
+- Assumes complete temporal coverage.
+- Hides irregular sampling intervals.
+- Can overstate or understate energy when telemetry is missing.
+- Does not preserve the temporal structure of the observed power curve.
+
+Decision:
+
+❌ Rejected
+
+---
+
+### Option B — Area under the available power curve
+
+Energy is calculated from the temporal relationship between available power observations.
+
+Conceptually:
+
+```text
+EnergyConsumedWh
+=
+Numerical Integration of Available Power Observations over Time
+```
+
+Advantages:
+
+- Respects irregular observation intervals.
+- Uses actual observation timestamps.
+- Better represents the available power curve.
+- Avoids assuming a fixed sample cadence.
+
+Disadvantages:
+
+- Requires explicit integration semantics.
+- Requires completeness semantics for missing coverage.
+
+Decision:
+
+✅ Accepted
+
+---
+
+# Mandatory Power Input
+
+AR-001 established:
+
+```text
+powerW = mandatory
+```
+
+Therefore every accepted `TelemetrySample` contains an explicit firmware-supplied power observation.
+
+The Aggregation Service must not derive missing power from:
+
+```text
+Voltage × Current
+```
+
+The aggregation input is:
+
+```text
+TelemetrySample.Power
+```
+
+which represents the persisted firmware-supplied power observation required by the V1 aggregation model.
+
+---
+
+# Available-Observation Principle
+
+The Aggregation Service integrates the power curve supported by available telemetry observations.
+
+It does not manufacture missing observations.
+
+Example:
+
+```text
+Window:
+[12:01:00, 12:02:00)
+
+Available observations:
+
+12:01:05 → 100 W
+12:01:20 → 150 W
+12:01:45 → 120 W
+```
+
+The service uses the available observations to construct supported curve segments.
+
+It does not automatically assume:
+
+```text
+12:01:00 → 100 W
+```
+
+and does not automatically extend:
+
+```text
+12:01:45 → 12:02:00 = 120 W
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+Available telemetry defines the supported power curve.
+
+Missing telemetry is not manufactured.
+```
+
+---
+
+# Observation Continuity
+
+## Option A — Unlimited previous-value hold
+
+The last observation remains valid indefinitely until another observation arrives.
+
+Decision:
+
+❌ Rejected
+
+Reason:
+
+A connectivity gap could be interpreted as continuous energy consumption without supporting telemetry.
+
+---
+
+## Option B — Arbitrary maximum integration gap
+
+An observation contributes only when the next observation arrives within a configured threshold.
+
+Decision:
+
+❌ Rejected for the current architecture
+
+Reason:
+
+This introduces a threshold coupled to sampling behavior without an accepted product requirement.
+
+---
+
+## Option C — Integrate available observations and expose completeness
+
+The service integrates supported curve segments and records how much of the projection window is observationally covered.
+
+Decision:
+
+✅ Accepted
+
+---
+
+# Projection Completeness
+
+`SampleCount` alone is insufficient to describe analytical quality.
+
+Two windows may contain the same number of samples but cover very different durations.
+
+Therefore projections require explicit completeness semantics.
+
+Accepted conceptual metrics:
+
+```text
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+Definitions:
+
+```text
+ObservedDurationSeconds
+=
+Duration supported by the available integrated power curve
+```
+
+```text
+ExpectedDurationSeconds
+=
+Nominal duration of the projection window
+```
+
+```text
+CoverageRatio
+=
+ObservedDurationSeconds / ExpectedDurationSeconds
+```
+
+Expected durations are:
+
+```text
+Minute = 60 seconds
+Hourly = 3600 seconds
+Daily = 86400 seconds
+```
+
+because all accepted aggregation windows are UTC-based.
+
+The exact database numeric precision remains a persistence-design detail.
+
+---
+
+# AR-004 — Formal Aggregation Window Semantics
+
+## Decision
+
+All aggregation windows use half-open UTC intervals:
+
+```text
+[StartUtc, EndUtc)
+```
+
+This means:
+
+```text
+StartUtc = included
+EndUtc   = excluded
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+# Minute Window
+
+Example:
+
+```text
+[12:01:00, 12:02:00)
+```
+
+Membership rule:
+
+```text
+MinuteUtc <= TimestampUtc
+AND
+TimestampUtc < MinuteUtc + 1 minute
+```
+
+Boundary examples:
+
+```text
+12:01:00.000 → included
+12:01:59.999 → included
+12:02:00.000 → excluded
+```
+
+`TelemetryMinute.MinuteUtc` represents the window start.
+
+---
+
+# Hourly Window
+
+Example:
+
+```text
+[12:00:00, 13:00:00)
+```
+
+Membership rule:
+
+```text
+HourUtc <= TimestampUtc
+AND
+TimestampUtc < HourUtc + 1 hour
+```
+
+Boundary examples:
+
+```text
+12:00:00.000 → included
+12:59:59.999 → included
+13:00:00.000 → excluded
+```
+
+`TelemetryHourly.HourUtc` represents the window start.
+
+---
+
+# Daily Window
+
+Example:
+
+```text
+[2026-05-30T00:00:00Z,
+ 2026-05-31T00:00:00Z)
+```
+
+Membership rule:
+
+```text
+DateUtc 00:00:00Z <= TimestampUtc
+AND
+TimestampUtc < NextDateUtc 00:00:00Z
+```
+
+`TelemetryDaily.DateUtc` represents the UTC calendar date whose window begins at midnight UTC.
+
+---
+
+# Boundary Ownership Principle
+
+For adjacent windows:
+
+```text
+W1 = [12:01:00, 12:02:00)
+
+W2 = [12:02:00, 12:03:00)
+```
+
+the timestamp:
+
+```text
+12:02:00
+```
+
+belongs only to:
+
+```text
+W2
+```
+
+Therefore:
+
+```text
+No Overlap
+No Boundary Gap
+Deterministic Timestamp Ownership
+```
+
+---
+
+# Integration Boundary Principle
+
+Numerical integration does not cross projection boundaries.
+
+For:
+
+```text
+W = [StartUtc, EndUtc)
+```
+
+the Aggregation Service must never attribute energy outside that window.
+
+Observations from a previous window are not carried forward to manufacture coverage in the current window.
+
+A later observation may provide supporting information for closing an available curve segment when available, but energy attribution remains clipped to `EndUtc`.
+
+---
+
+# Updated Minute Aggregation
+
+## Trigger
+
+Normal forward processing occurs:
+
+```text
+Minute by Minute
+```
+
+Example:
+
+```text
+Current time reaches 12:02:00
+        ↓
+Window [12:01:00, 12:02:00) becomes eligible
+        ↓
+Load TelemetrySample observations
+        ↓
+Construct supported power curve
+        ↓
+Calculate telemetry-derived metrics
+        ↓
+Upsert TelemetryMinute
+        ↓
+Advance minute checkpoint
+```
+
+---
+
+## Source
+
+```text
+TelemetrySample
+```
+
+Decision:
+
+✅ Canonical source
+
+---
+
+## Window
+
+```text
+[MinuteUtc, MinuteUtc + 1 minute)
+```
+
+---
+
+## Metrics
+
+Minute aggregation produces telemetry-derived metrics only:
+
+```text
+SampleCount
+MinPower
+MaxPower
+AvgPower
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+`EnergyConsumedWh` is calculated from numerical integration of the available supported power curve.
+
+No business metrics are generated.
+
+---
+
+# Updated Hourly Aggregation
+
+## Source
+
+```text
+TelemetrySample
+```
+
+Decision:
+
+✅ Canonical source
+
+---
+
+## Window
+
+```text
+[HourUtc, HourUtc + 1 hour)
+```
+
+---
+
+## Metrics
+
+Hourly aggregation uses the same metric family as minute aggregation:
+
+```text
+SampleCount
+MinPower
+MaxPower
+AvgPower
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+Only the window duration changes.
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Architectural Principle
+
+```text
+Minute and hourly projections share the same telemetry-derived metric semantics.
+
+Only the aggregation window differs.
+```
+
+---
+
+# Updated Daily Aggregation
+
+## Source
+
+```text
+TelemetrySample
+```
+
+Decision:
+
+✅ Canonical source
+
+---
+
+## Window
+
+```text
+[DateUtc 00:00:00Z,
+ NextDateUtc 00:00:00Z)
+```
+
+---
+
+## Metrics
+
+Daily aggregation follows the same telemetry-derived metric family:
+
+```text
+SampleCount
+MinPower
+MaxPower
+AvgPower
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+Decision:
+
+✅ Accepted
+
+The Aggregation Service does not calculate:
+
+```text
+EstimatedCost
+```
+
+because cost is a business-domain metric requiring tariff interpretation.
+
+That responsibility belongs outside the Telemetry Aggregation Service.
+
+---
+
+# Projection Symmetry Principle
+
+The accepted projection model is:
+
+```text
+TelemetryMinute
+TelemetryHourly
+TelemetryDaily
+```
+
+with identical telemetry-derived metric semantics:
+
+```text
+SampleCount
+MinPower
+MaxPower
+AvgPower
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+The only intended semantic difference is window duration.
+
+This reduces:
+
+- implementation divergence;
+- testing complexity;
+- metric ambiguity;
+- maintenance cost.
+
+---
+
+# AR-003 — Late Telemetry Detection
+
+## Problem
+
+Assume the minute checkpoint has advanced beyond:
+
+```text
+12:15:00
+```
+
+Later, telemetry is persisted with:
+
+```text
+TimestampUtc = 12:15:30
+CreatedAtUtc = 14:30:00
+```
+
+The observation belongs to a previously processed minute.
+
+A forward-only checkpoint will not naturally revisit that historical window.
+
+---
+
+## Accepted Strategy — Event Notification
+
+The Aggregation Service consumes durable telemetry-persisted notifications.
+
+Conceptually:
+
+```text
+Telemetry Persisted Event
+        ↓
+Read Observation TimestampUtc
+        ↓
+Derive Affected Windows
+        ↓
+Determine Whether Projection Exists
+        ↓
+Recompute as Required
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+# Affected Window Derivation
+
+Given:
+
+```text
+TimestampUtc = 2026-05-30T12:15:30Z
+```
+
+the Aggregation Service derives:
+
+Minute:
+
+```text
+[2026-05-30T12:15:00Z,
+ 2026-05-30T12:16:00Z)
+```
+
+Hourly:
+
+```text
+[2026-05-30T12:00:00Z,
+ 2026-05-30T13:00:00Z)
+```
+
+Daily:
+
+```text
+[2026-05-30T00:00:00Z,
+ 2026-05-31T00:00:00Z)
+```
+
+The service then determines whether those projections:
+
+- do not yet exist;
+- are pending normal forward processing;
+- already exist and require recomputation.
+
+---
+
+# Late Telemetry Recalculation
+
+When a previously processed window becomes stale:
+
+```text
+Telemetry Persisted Event
+        ↓
+Affected Window Derived
+        ↓
+Reload TelemetrySample for Complete Window
+        ↓
+Rebuild Supported Power Curve
+        ↓
+Recalculate Metrics
+        ↓
+Upsert Projection
+```
+
+The projection is updated retroactively using its existing composite key.
+
+Examples:
+
+```text
+TelemetryMinute
+(ChannelId, MinuteUtc)
+```
+
+```text
+TelemetryHourly
+(ChannelId, HourUtc)
+```
+
+```text
+TelemetryDaily
+(ChannelId, DateUtc)
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+# Projection Rebuild Strategy
+
+All analytical projections remain disposable.
+
+Accepted rebuild procedure:
+
+```text
+Delete Projection Data
+        ↓
+Reset Relevant Checkpoint
+        ↓
+Replay TelemetrySample
+        ↓
+Regenerate Projections
+```
+
+Decision:
+
+✅ Accepted
+
+Loss of projection data does not imply telemetry loss.
+
+Loss of checkpoint data does not imply telemetry loss.
+
+---
+
+# Checkpoint Strategy
+
+Checkpoints remain separate per aggregation granularity:
+
+```text
+Minute
+Hourly
+Daily
+```
+
+Conceptually:
+
+```text
+AggregationName = Minute
+AggregationName = Hourly
+AggregationName = Daily
+```
+
+Decision:
+
+✅ Accepted
+
+---
+
+## Checkpoint Meaning
+
+A checkpoint is:
+
+```text
+Optimization State
+```
+
+It is not:
+
+```text
+Source of Truth
+```
+
+It records forward-processing progress.
+
+Late telemetry does not require moving the checkpoint backward.
+
+Instead:
+
+```text
+Forward Checkpoint
+        +
+Event-Driven Historical Recalculation
+```
+
+operate as complementary mechanisms.
+
+---
+
+## Architectural Principle
+
+```text
+Checkpoints optimize forward progress.
+
+Events identify historical invalidation.
+```
+
+---
+
+# Checkpoint Recovery
+
+After service restart:
+
+```text
+Read Checkpoint
+        ↓
+Continue from Last Successful Position
+```
+
+If checkpoint state is lost or intentionally reset:
+
+```text
+TelemetrySample
+        ↓
+Replay
+        ↓
+Regenerate Disposable Projections
+```
+
+---
+
+# Event Delivery and Idempotency
+
+SD-004 requires at-least-once-compatible event delivery.
+
+Therefore the Aggregation Service must tolerate duplicate telemetry-persisted notifications.
+
+Duplicate event example:
+
+```text
+Same Telemetry Persisted Event
+        ↓
+Same Affected Window Derived
+        ↓
+Projection Recomputed Again
+```
+
+The result must remain correct.
+
+Projection writes must therefore be idempotent.
+
+Accepted persistence behavior:
+
+```text
+Upsert by Composite Projection Key
+```
+
+---
+
+# Updated End-to-End Aggregation Flow
+
+```text
+TelemetrySample
+        ↓
+Normal Forward Processing
+        ↓
+Minute / Hourly / Daily Checkpoints
+        ↓
+Generate Disposable Projections
+```
+
+and independently:
+
+```text
+Telemetry Persisted Event
+        ↓
+Derive Affected Windows
+        ↓
+Detect Historical Projection Impact
+        ↓
+Reload TelemetrySample
+        ↓
+Recompute Projection
+        ↓
+Upsert by Composite Key
+```
+
+Together:
+
+```text
+Forward Progress
++
+Historical Invalidation
+=
+Eventually Correct Projections
+```
+
+---
+
+# Updated Data Ownership
+
+The Telemetry Aggregation Service owns:
+
+```text
+TelemetryMinute
+TelemetryHourly
+TelemetryDaily
+AggregationCheckpoint
+```
+
+It reads:
+
+```text
+TelemetrySample
+```
+
+It consumes:
+
+```text
+Telemetry Persisted Events
+```
+
+It does not own:
+
+```text
+TelemetrySample
+TelemetryRejection
+Monitor
+Channel Registration
+EnergyTariff
+ChannelAssignment
+```
+
+---
+
+# Updated Acceptance Criteria
+
+SD-005 is complete when all of the following are defined:
+
+- [x] Minute aggregation defined.
+- [x] Hourly aggregation defined.
+- [x] Daily aggregation defined.
+- [x] Checkpoint strategy defined.
+- [x] `TelemetrySample` established as canonical projection source.
+- [x] Numerical integration semantics defined.
+- [x] Missing telemetry behavior defined.
+- [x] Projection completeness semantics defined.
+- [x] Half-open UTC window semantics defined.
+- [x] Late telemetry detection defined.
+- [x] Historical projection recalculation defined.
+- [x] Event-consumer idempotency defined.
+- [x] Projection rebuild strategy defined.
+- [x] Business metrics excluded from aggregation ownership.
+
+---
+
+# Database Consequences
+
+The database model must be aligned with SD-005.
+
+## `TelemetrySample.Power`
+
+Must be:
+
+```text
+NOT NULL
+```
+
+because Telemetry Contract V1 requires `powerW`.
+
+---
+
+## Projection metrics
+
+`TelemetryMinute`, `TelemetryHourly`, and `TelemetryDaily` should expose identical telemetry-derived metric semantics.
+
+Required conceptual fields:
+
+```text
+SampleCount
+MinPower
+MaxPower
+AvgPower
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+---
+
+## `TelemetryDaily.EstimatedCost`
+
+Must be removed from the telemetry-derived projection.
+
+Reason:
+
+```text
+EstimatedCost
+=
+Business Interpretation
+```
+
+It depends on tariff configuration and therefore does not belong to the Telemetry Aggregation Service.
+
+---
+
+## Outbox integration state
+
+SD-004 requires an outbox persistence model for durable event intent.
+
+This table is owned by the ingestion/event-publication boundary, not by the Aggregation Service.
+
+---
+
+# Final Decision Summary
+
+| Decision | Result |
+|---|---|
+| Canonical aggregation source | `TelemetrySample` |
+| Power input | Mandatory firmware-supplied `Power` |
+| Energy calculation | Numerical integration of available power curve |
+| Missing telemetry | Not manufactured |
+| Previous-window carry-forward | Rejected |
+| Projection completeness | Explicit |
+| Minute window | Half-open UTC interval |
+| Hourly window | Half-open UTC interval |
+| Daily window | Half-open UTC interval |
+| Minute metrics | Telemetry-derived |
+| Hourly metrics | Same semantic family as minute |
+| Daily metrics | Same semantic family as minute/hourly |
+| Cost estimation | Excluded |
+| Late telemetry detection | Durable event notification |
+| Historical correction | Recompute from `TelemetrySample` |
+| Projection persistence | Idempotent upsert |
+| Checkpoints | Per minute, hourly, daily |
+| Checkpoint role | Optimization only |
+| Projection rebuild | Delete, reset checkpoint, replay |
+| Event delivery compatibility | At least once |
+| Projection consistency | Eventually correct |
+
+---
+
+# Final Architectural Principle
+
+```text
+TelemetrySample is the permanent source of truth.
+
+Aggregation windows are deterministic half-open UTC intervals.
+
+Available observations define the supported power curve.
+
+Missing telemetry is not manufactured.
+
+Disposable projections expose both telemetry-derived metrics and observational completeness.
+
+Checkpoints optimize forward progress.
+
+Durable events identify historical invalidation.
+
+Late telemetry causes deterministic recomputation from TelemetrySample.
+```
+
