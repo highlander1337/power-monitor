@@ -115,6 +115,24 @@ This design simplifies recovery, supports late-arriving telemetry, and allows ag
 
 ---
 
+## Principle 6: Disposable Analytical Projections
+
+TelemetryMinute, TelemetryHourly, and TelemetryDaily are disposable projections derived from TelemetrySample.
+
+They may be deleted and regenerated without telemetry loss.
+
+Projection checkpoints are optimization state only and are not a source of truth.
+
+## Principle 7: Explicit Service Ownership
+
+The Telemetry Ingestion Service preserves valid observations and durable event intent.
+
+The Telemetry Aggregation Service derives telemetry-only analytical projections.
+
+The Energy Analytics API owns business interpretation, including tariff-based cost estimation.
+
+---
+
 # Architecture Decision
 
 ## Hybrid Telemetry and Business Architecture
@@ -208,6 +226,9 @@ Contains:
 - TelemetryHourly
 - TelemetryDaily
 - EnergyTariff
+- TelemetryRejection
+- AggregationCheckpoint
+- OutboxMessage
 
 ## Energy.Infrastructure
 
@@ -233,28 +254,40 @@ Contains:
 ## Telemetry Ingestion Service
 
 - MQTT subscriptions
-- Telemetry contract validation
-- Heartbeat contract validation
-- Automatic monitor registration
+- Telemetry and heartbeat contract validation
+- Heartbeat-driven monitor registration
+- Channel resolution
 - Telemetry persistence
 - Heartbeat tracking
-- Operational failure persistence
+- Validation rejection persistence
+- Durable outbox event-intent persistence
+- MQTT acknowledgement after successful commit
 
 Owns:
 
-- Monitor
-- Channel
 - TelemetrySample
 - TelemetryRejection
+- OutboxMessage
+- Heartbeat-driven Monitor and Channel registration behavior
+
+Does not own:
+
+- Minute aggregation
+- Hourly aggregation
+- Daily aggregation
+- Business cost calculations
 
 ## Telemetry Aggregation Service
 
-- Generates minute projections
-- Generates hourly projections
-- Generates daily projections
-- Maintains aggregation checkpoints
-- Rebuilds disposable projections
-- Recomputes projections when late telemetry arrives
+- Consumes telemetry-persisted notifications
+- Reads TelemetrySample as the canonical aggregation source
+- Generates minute, hourly, and daily disposable projections
+- Calculates energy through numerical integration of the available supported power curve
+- Calculates time-weighted average power over observed duration
+- Tracks projection completeness
+- Maintains independent minute, hourly, and daily checkpoints
+- Recomputes affected historical windows when late telemetry arrives
+- Performs idempotent projection upserts
 
 Owns:
 
@@ -263,6 +296,14 @@ Owns:
 - TelemetryDaily
 - AggregationCheckpoint
 
+Does not own:
+
+- MQTT telemetry ingestion
+- Telemetry contract validation
+- Monitor registration
+- Energy tariff interpretation
+- Cost estimation
+- Forecasting or machine learning
 ## Energy Analytics API
 
 - Room management
@@ -279,6 +320,8 @@ Owns:
 
 # Telemetry Model
 
+Telemetry Contract V1 represents one physical-port observation per MQTT message.
+
 Example payload:
 
 ```json
@@ -291,24 +334,63 @@ Example payload:
 }
 ```
 
+Contract requirements:
+
+- `timestampUtc` is mandatory and device-owned.
+- `physicalPort` is mandatory and greater than zero.
+- `voltageVrms` is mandatory.
+- `currentArms` is mandatory.
+- `powerW` is mandatory and firmware-supplied.
+- Measurement units are explicit through contract-by-design field names.
+- The backend does not derive missing power from voltage and current.
+
 ---
 
 # Telemetry Aggregation Strategy
 
-```
-TelemetrySample
-        │
-        ├──► TelemetryMinute
-        │
-        ├──► TelemetryHourly
-        │
-        └──► TelemetryDaily
+`TelemetrySample` is always the canonical source for all analytical projections.
+
+```text
+TelemetrySample → TelemetryMinute
+TelemetrySample → TelemetryHourly
+TelemetrySample → TelemetryDaily
 ```
 
-All aggregation projections are derived directly from TelemetrySample. The Telemetry Aggregation Service treats TelemetrySample as the system of record. Minute, hourly and daily projections are independent disposable views and may be regenerated at any time.
+Minute, hourly, and daily projections are disposable and may always be regenerated from `TelemetrySample`.
 
-AggregationCheckpoint tracks aggregation progress and enables safe recovery after service interruptions.
+Aggregation windows use half-open UTC intervals:
 
+```text
+Minute: [MinuteUtc, MinuteUtc + 1 minute)
+Hourly: [HourUtc, HourUtc + 1 hour)
+Daily: [DateUtc 00:00:00Z, NextDateUtc 00:00:00Z)
+```
+
+Energy is calculated by numerical integration of the available supported power curve. Missing telemetry is not manufactured, and integration does not cross projection boundaries.
+
+`AvgPowerW` is the time-weighted average power over `ObservedDurationSeconds` and is derived from the same integrated curve used for `EnergyConsumedWh`.
+
+For projections where `ObservedDurationSeconds > 0`:
+
+```text
+AvgPowerW
+=
+EnergyConsumedWh × 3600
+/
+ObservedDurationSeconds
+```
+
+Projection completeness is represented by:
+
+- `ObservedDurationSeconds`
+- `ExpectedDurationSeconds`
+- `CoverageRatio`
+
+A projection row is not created when `ObservedDurationSeconds = 0`.
+
+`AggregationCheckpoint` tracks forward-processing progress independently for minute, hourly, and daily jobs. Checkpoints are optimization state only.
+
+Late telemetry is detected through durable telemetry-persisted events. The Aggregation Service derives affected historical windows and recomputes them from `TelemetrySample` using idempotent upserts.
 ---
 
 # Data Model
@@ -382,10 +464,13 @@ Stores messages rejected during ingestion.
 Minute-level analytics projection.
 
 - SampleCount
-- MinPower
-- MaxPower
-- AvgPower
+- MinPowerW
+- MaxPowerW
+- AvgPowerW
 - EnergyConsumedWh
+- ObservedDurationSeconds
+- ExpectedDurationSeconds
+- CoverageRatio
 
 
 Composite Key:
@@ -397,10 +482,13 @@ Composite Key:
 Hourly analytics projection.
 
 - SampleCount
-- MinPower
-- MaxPower
-- AvgPower
+- MinPowerW
+- MaxPowerW
+- AvgPowerW
 - EnergyConsumedWh
+- ObservedDurationSeconds
+- ExpectedDurationSeconds
+- CoverageRatio
 
 Composite Key:
 
@@ -411,9 +499,9 @@ Composite Key:
 Daily analytics projection.
 
 - SampleCount
-- MinPower
-- MaxPower
-- AvgPower
+- MinPowerW
+- MaxPowerW
+- AvgPowerW
 - EnergyConsumedWh
 
 Composite Key:
@@ -449,23 +537,69 @@ Included:
 
 ## Telemetry Ingestion Service
 
-Included:
+- MQTT subscriptions
+- Telemetry and heartbeat contract validation
+- Heartbeat-driven monitor registration
+- Channel resolution
+- Telemetry persistence
+- Heartbeat tracking
+- Validation rejection persistence
+- Durable outbox event-intent persistence
+- MQTT acknowledgement after successful commit
 
-- MQTT Consumer
-- Contract Validation
-- Automatic Registration
-- Telemetry Persistence
-- Operational Failure Persistence
+Owns:
 
+- TelemetrySample
+- TelemetryRejection
+- OutboxMessage
+- Heartbeat-driven Monitor and Channel registration behavior
+
+Does not own:
+
+- Minute aggregation
+- Hourly aggregation
+- Daily aggregation
+- Business cost calculations
+
+## Telemetry Aggregation Service
+
+- Consumes telemetry-persisted notifications
+- Reads TelemetrySample as the canonical aggregation source
+- Generates minute, hourly, and daily disposable projections
+- Calculates energy through numerical integration of the available supported power curve
+- Calculates time-weighted average power over observed duration
+- Tracks projection completeness
+- Maintains independent minute, hourly, and daily checkpoints
+- Recomputes affected historical windows when late telemetry arrives
+- Performs idempotent projection upserts
+
+Owns:
+
+- TelemetryMinute
+- TelemetryHourly
+- TelemetryDaily
+- AggregationCheckpoint
+
+Does not own:
+
+- MQTT telemetry ingestion
+- Telemetry contract validation
+- Monitor registration
+- Energy tariff interpretation
+- Cost estimation
+- Forecasting or machine learning
 ## Telemetry Aggregation Service
 
 Included:
 
+- Telemetry Persisted Event Consumption
 - Minute Aggregation
 - Hourly Aggregation
 - Daily Aggregation
-- Checkpoint Management
-- Projection Rebuild
+- Numerical Energy Integration
+- Projection Completeness Metrics
+- Late-Telemetry Recalculation
+- Aggregation Checkpoints
 
 ## Energy Analytics API
 
@@ -493,8 +627,8 @@ Included:
 
 ## Real-Time Monitoring
 
-- Voltage (V)
-- Current (A)
+- RMS Voltage (V)
+- RMS Current (A)
 - Power (W)
 
 ## Historical Analytics
