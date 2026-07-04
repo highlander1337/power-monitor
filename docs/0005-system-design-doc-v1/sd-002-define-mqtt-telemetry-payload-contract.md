@@ -479,3 +479,164 @@ Open questions:
 3. How should monitor topology changes be reported?
 4. What heartbeat validation rules apply?
 5. Should heartbeat support capability discovery?
+
+---
+
+## AR-001 Amendment — Mandatory Power Observation
+
+### Context
+
+The original SD-002 design considered `powerW` optional. The cross-iteration architecture review identified a conflict with SD-005 because `EnergyConsumedWh` is calculated by numerical integration of the firmware-reported power curve.
+
+If `powerW` is absent, the Telemetry Aggregation Service has no explicit power observation to integrate without deriving electrical information in the backend.
+
+### Q — Should `powerW` remain optional?
+
+#### Option A — Keep `powerW` optional
+
+Advantages:
+
+- Firmware may publish only voltage and current.
+
+Disadvantages:
+
+- The Telemetry Aggregation Service has no explicit power observation to integrate.
+- Energy aggregation becomes dependent on backend derivation.
+- Missing power semantics become ambiguous.
+
+Decision:
+
+❌ Rejected
+
+#### Option B — Derive missing power in the backend
+
+Example:
+
+```text
+Power ≈ VoltageVrms × CurrentArms
+```
+
+Advantages:
+
+- Allows aggregation when explicit power is absent.
+
+Disadvantages:
+
+- Makes backend services responsible for electrical interpretation.
+- May conflate different electrical quantities.
+- Creates ambiguity between device-observed and backend-derived values.
+- Violates established service ownership boundaries.
+
+Decision:
+
+❌ Rejected
+
+#### Option C — Require explicit firmware-supplied power
+
+Advantages:
+
+- Provides deterministic input for aggregation.
+- Preserves firmware as the source of electrical observations.
+- Prevents backend services from manufacturing missing measurements.
+- Supports explicit future evolution toward richer power quantities.
+
+Disadvantages:
+
+- Firmware must always produce the required V1 power observation.
+
+Decision:
+
+✅ Accepted
+
+### Final Decision
+
+`powerW` is mandatory in Telemetry Contract V1.
+
+Final payload:
+
+```json
+{
+  "timestampUtc": "2026-05-30T18:30:00Z",
+  "physicalPort": 1,
+  "voltageVrms": 127.3,
+  "currentArms": 1.82,
+  "powerW": 231.6
+}
+```
+
+Field requirements:
+
+| Field | Requirement | Semantics |
+|---|---|---|
+| `timestampUtc` | Mandatory | Device-owned UTC observation time |
+| `physicalPort` | Mandatory | Positive physical monitor port |
+| `voltageVrms` | Mandatory | RMS voltage in volts |
+| `currentArms` | Mandatory | RMS current in amperes |
+| `powerW` | Mandatory | Firmware-supplied power observation in watts |
+
+### Validation Consequences
+
+A Telemetry Contract V1 message is rejected and recorded for operational traceability when `powerW` is:
+
+- missing;
+- `null`;
+- not parseable as the expected numeric type.
+
+No additional electrical range constraints are introduced by this amendment.
+
+The Telemetry Ingestion Service must not derive missing power from voltage and current.
+
+### Persistence Consequence
+
+`TelemetrySample.Power` must be non-nullable.
+
+Conceptually:
+
+```text
+TelemetrySample.Power
+=
+Required persisted firmware-supplied power observation
+```
+
+### Aggregation Consequence
+
+Every accepted `TelemetrySample` contains the explicit power observation required by SD-005 to construct supported power-curve segments and calculate `EnergyConsumedWh`.
+
+```text
+TelemetrySample.Power
+        ↓
+Available Power Curve
+        ↓
+Numerical Integration
+        ↓
+EnergyConsumedWh
+```
+
+### Future Evolution
+
+Telemetry Contract V1 retains the field:
+
+```text
+powerW
+```
+
+Future contract versions may introduce explicit electrical quantities such as:
+
+```text
+activePowerW
+reactivePowerVar
+apparentPowerVa
+powerFactor
+phaseAngleDeg
+```
+
+Such evolution must be explicit. Backend services must not infer future power semantics from the current `powerW` field.
+
+### Architectural Principle
+
+```text
+Telemetry Contract V1 requires an explicit firmware-supplied power observation.
+
+Backend services validate, persist, and aggregate that observation but do not manufacture missing electrical measurements.
+```
+
