@@ -205,9 +205,9 @@ Each projection contains:
 ```text
 SampleCount
 
-MinPower
-MaxPower
-AvgPower
+MinPowerW
+MaxPowerW
+AvgPowerW
 
 EnergyConsumedWh
 ```
@@ -991,9 +991,9 @@ Minute aggregation produces telemetry-derived metrics only:
 
 ```text
 SampleCount
-MinPower
-MaxPower
-AvgPower
+MinPowerW
+MaxPowerW
+AvgPowerW
 EnergyConsumedWh
 ObservedDurationSeconds
 ExpectedDurationSeconds
@@ -1034,9 +1034,9 @@ Hourly aggregation uses the same metric family as minute aggregation:
 
 ```text
 SampleCount
-MinPower
-MaxPower
-AvgPower
+MinPowerW
+MaxPowerW
+AvgPowerW
 EnergyConsumedWh
 ObservedDurationSeconds
 ExpectedDurationSeconds
@@ -1090,9 +1090,9 @@ Daily aggregation follows the same telemetry-derived metric family:
 
 ```text
 SampleCount
-MinPower
-MaxPower
-AvgPower
+MinPowerW
+MaxPowerW
+AvgPowerW
 EnergyConsumedWh
 ObservedDurationSeconds
 ExpectedDurationSeconds
@@ -1129,9 +1129,9 @@ with identical telemetry-derived metric semantics:
 
 ```text
 SampleCount
-MinPower
-MaxPower
-AvgPower
+MinPowerW
+MaxPowerW
+AvgPowerW
 EnergyConsumedWh
 ObservedDurationSeconds
 ExpectedDurationSeconds
@@ -1539,9 +1539,9 @@ Required conceptual fields:
 
 ```text
 SampleCount
-MinPower
-MaxPower
-AvgPower
+MinPowerW
+MaxPowerW
+AvgPowerW
 EnergyConsumedWh
 ObservedDurationSeconds
 ExpectedDurationSeconds
@@ -1620,5 +1620,338 @@ Checkpoints optimize forward progress.
 Durable events identify historical invalidation.
 
 Late telemetry causes deterministic recomputation from TelemetrySample.
+```
+
+---
+
+## AR-005 Alignment — Time-Weighted Average Power Semantics
+
+### Context
+
+SD-005 defines `EnergyConsumedWh` through numerical integration of the available supported power curve.
+
+The addition of projection completeness fields exposed an ambiguity in the meaning of average power:
+
+```text
+Should AvgPowerW represent:
+
+Arithmetic Mean of Sample Values
+
+or
+
+Time-Weighted Average Power over Observed Duration?
+```
+
+Because telemetry observations may be irregularly spaced, an arithmetic mean can misrepresent the temporal power curve.
+
+---
+
+# Q — How should average power be calculated?
+
+## Option A — Arithmetic mean of sample values
+
+Conceptually:
+
+```text
+AvgPowerW
+=
+Sum(Power Samples) / SampleCount
+```
+
+Advantages:
+
+- Simple to calculate.
+- Familiar statistical interpretation.
+
+Disadvantages:
+
+- Ignores irregular time spacing between observations.
+- Gives each observation equal weight regardless of duration.
+- May be mathematically inconsistent with integrated energy.
+- Can misrepresent the supported power curve.
+
+Decision:
+
+❌ Rejected
+
+---
+
+## Option B — Time-weighted average over observed duration
+
+`AvgPowerW` is derived from the same supported power curve used to calculate `EnergyConsumedWh`.
+
+Conceptually:
+
+```text
+AvgPowerW
+=
+IntegratedEnergyWh × 3600
+/
+ObservedDurationSeconds
+```
+
+Equivalently:
+
+```text
+IntegratedEnergyWh
+=
+AvgPowerW × ObservedDurationSeconds / 3600
+```
+
+Advantages:
+
+- Respects irregular observation intervals.
+- Remains coherent with numerical integration semantics.
+- Uses the same supported power curve as `EnergyConsumedWh`.
+- Preserves mathematical consistency between energy, duration, and average power.
+
+Disadvantages:
+
+- Requires a valid non-zero observed duration.
+- Cannot be replaced by a simple arithmetic average of samples.
+
+Decision:
+
+✅ Accepted
+
+---
+
+# Final Decision
+
+`AvgPowerW` is the time-weighted average power over `ObservedDurationSeconds`.
+
+It is not the arithmetic mean of telemetry sample values.
+
+The Aggregation Service must derive `AvgPowerW` from the same integrated supported power curve used for `EnergyConsumedWh`.
+
+Architecturally:
+
+```text
+Available Telemetry Observations
+        ↓
+Supported Power Curve
+        ↓
+Numerical Integration
+        ↓
+EnergyConsumedWh
+        +
+ObservedDurationSeconds
+        ↓
+AvgPowerW
+```
+
+---
+
+# Zero Observed Duration
+
+If:
+
+```text
+ObservedDurationSeconds = 0
+```
+
+then the time-weighted average is mathematically undefined.
+
+The Aggregation Service must not divide by zero or manufacture an average power value.
+
+The exact persistence behavior for a zero-duration projection remains a separate design decision unless already constrained by projection creation rules.
+
+No implicit fallback to arithmetic sample average is allowed.
+
+---
+
+# Metric Naming Alignment
+
+To preserve contract-by-design unit semantics, projection power metrics use explicit watt suffixes.
+
+Previous names:
+
+```text
+MinPower
+MaxPower
+AvgPower
+```
+
+Accepted names:
+
+```text
+MinPowerW
+MaxPowerW
+AvgPowerW
+```
+
+This naming convention aligns projection fields with explicit-unit semantics already used by:
+
+```text
+voltageVrms
+currentArms
+powerW
+EnergyConsumedWh
+```
+
+---
+
+# Updated Projection Metric Family
+
+`TelemetryMinute`, `TelemetryHourly`, and `TelemetryDaily` use the same telemetry-derived metric family:
+
+```text
+SampleCount
+MinPowerW
+MaxPowerW
+AvgPowerW
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+Only the aggregation window differs.
+
+---
+
+# Mathematical Consistency Invariant
+
+For every projection with:
+
+```text
+ObservedDurationSeconds > 0
+```
+
+the following relationship must hold within the accepted numeric precision and rounding tolerance:
+
+```text
+AvgPowerW
+=
+EnergyConsumedWh × 3600
+/
+ObservedDurationSeconds
+```
+
+This invariant should be covered by aggregation tests.
+
+---
+
+# Consequences for Minute Aggregation
+
+Minute projections calculate:
+
+```text
+SampleCount
+MinPowerW
+MaxPowerW
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+and derive:
+
+```text
+AvgPowerW
+```
+
+from integrated energy and observed duration.
+
+Window:
+
+```text
+[MinuteUtc, MinuteUtc + 1 minute)
+```
+
+---
+
+# Consequences for Hourly Aggregation
+
+Hourly projections use identical metric semantics:
+
+```text
+SampleCount
+MinPowerW
+MaxPowerW
+AvgPowerW
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+Window:
+
+```text
+[HourUtc, HourUtc + 1 hour)
+```
+
+`AvgPowerW` remains time-weighted over the hourly projection's observed duration.
+
+---
+
+# Consequences for Daily Aggregation
+
+Daily projections use identical metric semantics:
+
+```text
+SampleCount
+MinPowerW
+MaxPowerW
+AvgPowerW
+EnergyConsumedWh
+ObservedDurationSeconds
+ExpectedDurationSeconds
+CoverageRatio
+```
+
+Window:
+
+```text
+[DateUtc 00:00:00Z, NextDateUtc 00:00:00Z)
+```
+
+`AvgPowerW` remains time-weighted over the daily projection's observed duration.
+
+---
+
+# Database Consequences
+
+The projection tables must use:
+
+```text
+MinPowerW
+MaxPowerW
+AvgPowerW
+```
+
+instead of:
+
+```text
+MinPower
+MaxPower
+AvgPower
+```
+
+Affected tables:
+
+```text
+TelemetryMinute
+TelemetryHourly
+TelemetryDaily
+```
+
+`AvgPowerW` must be calculated from the same integration result used for `EnergyConsumedWh`.
+
+---
+
+# Updated Architectural Principle
+
+```text
+EnergyConsumedWh and AvgPowerW are two mathematically coherent views
+of the same supported power curve.
+
+EnergyConsumedWh expresses integrated energy.
+
+AvgPowerW expresses time-weighted average power over observed duration.
+
+Neither metric is derived from an arithmetic mean of irregularly spaced samples.
 ```
 
